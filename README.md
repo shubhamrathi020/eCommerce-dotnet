@@ -1,0 +1,78 @@
+# eCommerce .NET API
+
+An ASP.NET Core implementation of the shop's backend: controllers, EF Core, the official drivers. It serves the **same HTTP API**
+as the NestJS server in [`eCommerce-api`](../eCommerce-api) against the **same databases** (PostgreSQL, MongoDB, Meilisearch,
+Redis, RabbitMQ), so a frontend can talk to any of the backends and they can even run side by side on one stack.
+
+| | Nest (`eCommerce-api`) | Go (`eCommerce-go`) | Node (`eCommerce-node`) | .NET (this repository) |
+|---|---|---|---|---|
+| Port in the compose files | 3333 | 3334 | 3335 | 3336 |
+| Owns the PostgreSQL schema | **yes** (Prisma migrations) | no | no | no |
+
+## How it is kept identical
+
+1. **The Nest test suite runs against this server.** `eCommerce-api` has a test harness mode: with `API_BIN` (and `API_ARGS`) pointing
+   at the server built here, its 65 integration specs start it as a child process and run unchanged over HTTP (auth, accounts,
+   catalog, admin catalog, cart, checkout, orders, payments, messaging, metrics, contract shapes). The one spec that calls a Nest
+   internal directly (the abandoned-cart job) is covered by `tests/EcomApi.Tests/SchedulerTests.cs` here.
+2. **The shared business rules are checked against golden output from the TypeScript original.** `tests/EcomApi.Tests/testdata/golden.json`
+   is produced by running `@ecom/contracts` over 400 generated carts and many coupons, amounts, products and roles (the generator is
+   `testdata/gen/gen.mjs` in `eCommerce-go`); `GoldenTests` requires the C# port in `src/EcomApi/Domain` to match it exactly.
+3. **Passwords and tokens interoperate.** Argon2id hashes are standard PHC strings in both directions (the parameters are read in any
+   order), and the JWT access tokens use the same secret, claims, audience and issuer, so a user created on one server can sign in on
+   another and a token from one is accepted by the others. `InteropTests` pins this with a hash and a token made by the Node server.
+4. **A differential probe** recorded how the Nest server answers odd requests (malformed JSON, unknown routes, CORS preflight, HEAD,
+   conditional GETs, missing CSRF headers, wrong content types ...) and the answers were diffed against this server.
+
+## Run it
+
+```bash
+# 1. The data stores and the schema come from the Nest stack (eCommerce-api):
+cd ../eCommerce-api && docker compose up -d postgres redis mongo rabbitmq meilisearch api-migrate catalog-seed
+# 2. The .NET API in Docker:
+cd ../eCommerce-dotnet && docker compose up --build -d      # http://localhost:3336
+```
+
+Or without Docker, with .NET 10 and the same environment variables as the Nest API (`DATABASE_URL`, `MONGODB_URL`, `MEILI_URL`,
+`REDIS_URL`, `RABBITMQ_URL`, `JWT_ACCESS_SECRET`, `JWT_REFRESH_SECRET`, `CORS_ORIGINS`, optional Razorpay test keys, `PORT`):
+
+```bash
+dotnet run --project src/EcomApi
+```
+
+`NODE_ENV` (`production`, `test`) is honoured for compatibility with the other implementations; `ASPNETCORE_ENVIRONMENT=Production`
+means the same as `NODE_ENV=production`.
+
+## Test it
+
+```bash
+dotnet test -c Release        # 21 tests: the golden rules, interop, configuration, circuit breaker, the abandoned-cart job
+
+# the shared integration specs, against this server
+dotnet publish src/EcomApi/EcomApi.csproj -c Release -o publish
+cd ../eCommerce-api/apps/api
+API_BIN=dotnet API_ARGS="<path to this repo>/publish/EcomApi.dll" pnpm exec vitest run test/
+```
+
+The abandoned-cart test needs the test PostgreSQL that the Nest specs also use and quietly does nothing when it is not reachable.
+
+## Layout
+
+`src/EcomApi/Program.cs` entry and wiring (the Nest `AppModule`) · `Http/Pipeline.cs` the middleware that makes ASP.NET Core answer like
+Express (security headers, CORS, body parsing, request ids, error bodies, conditional GETs) · `Http/Filters.cs` the guards as MVC filters
+(rate limits, authentication, CSRF, body validation) · `Controllers/*` the controllers · `Services/*` the services (`Catalog`,
+`Commerce`, `Messaging`) · `Domain/*` the C# port of `@ecom/contracts` · `Data/*` EF Core entities over the Prisma-owned tables ·
+`Cache/*` Redis cache, rate limits and coupon counters · `Metrics/*` Prometheus metrics.
+
+## Differences from the Nest server
+
+- There is no OpenAPI/Swagger page (`/docs`); the routes are the same.
+- The schema is not migrated from here. Run the Nest API's migrations (`pnpm db:migrate:deploy`, or its `api-migrate` compose
+  service) first. The entities in `Data/Entities.cs` only describe the tables.
+- Malformed JSON gets the same 400 and error shape, but the message is .NET's parser message, not V8's. A path with a broken
+  percent-encoding is not special-cased (Nest answers 400, this answers as for any unknown product).
+- Log lines are JSON objects with `time`, `level`, `logger` and `message`, not Nest's text format.
+- `/metrics` carries .NET runtime metrics next to the shared ones (`http_requests_total`, `cache_hit_ratio`, `circuit_breaker_state`,
+  `outbox_unpublished_total`) and a few `process_*` gauges.
+- With a native MongoDB also installed on the same machine, `localhost` may resolve to that one instead of the Docker container; use the
+  container's address (for example `mongodb://[::1]:27017`).

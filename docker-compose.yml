@@ -1,0 +1,41 @@
+# The .NET API next to the Nest API's infrastructure. Start that stack first, from the eCommerce-api repository:
+#   docker compose up -d postgres redis mongo rabbitmq meilisearch api-migrate catalog-seed
+# (the Nest API owns the database schema and the catalog seed, so the .NET API reuses the same data stores)
+# then, from here:
+#   docker compose up --build -d
+# The .NET API is on http://localhost:3336 (Nest stays on 3333, Go on 3334, Node on 3335), so the frontends can switch between them.
+name: shop-dotnet
+
+services:
+  api-dotnet:
+    build: .
+    image: shop-api-dotnet:local
+    ports:
+      - "3336:3333"
+    environment:
+      PORT: "3333"
+      ASPNETCORE_ENVIRONMENT: Production
+      DATABASE_URL: "postgresql://ecommerce:ecommerce@postgres:5432/ecommerce?schema=public"
+      REDIS_URL: "redis://redis:6379"
+      MONGODB_URL: "mongodb://mongo:27017"
+      MEILI_URL: "http://meilisearch:7700"
+      RABBITMQ_URL: "amqp://guest:guest@rabbitmq:5672"
+      # Dev-only defaults so the stack runs out of the box; they must equal the Nest API's so tokens interoperate.
+      JWT_ACCESS_SECRET: "dev-only-access-secret-change-me-please-32chars"
+      JWT_REFRESH_SECRET: "dev-only-refresh-secret-change-me-please-32chr"
+      CORS_ORIGINS: "http://localhost:4000,http://localhost:4001,http://localhost:4200,http://localhost:4201,http://localhost:4202,http://localhost:5173,http://localhost:5174,http://localhost:5175,http://localhost:4100,http://localhost:4101,http://localhost:4102"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    networks:
+      - shop
+
+networks:
+  shop:
+    name: shop_default
+    external: true
