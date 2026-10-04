@@ -51,6 +51,8 @@ public sealed class ApiConfig
     public int RefreshTokenDays { get; init; } = 30;
     /// <summary>Rate limiting is on everywhere except the automated test run (unless a test switches it back on).</summary>
     public bool RateLimit { get; init; }
+    /// <summary>OpenAPI docs at /docs: always outside production, opt-in (API_DOCS=on) in production.</summary>
+    public bool Docs { get; init; }
 
     public static ApiConfig Load(IDictionary<string, string?> env)
     {
@@ -127,6 +129,7 @@ public sealed class ApiConfig
             RazorpayEnabled = razorpayKeyId.Length > 0,
             CorsOrigins = Get("CORS_ORIGINS").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries),
             RateLimit = !isTest || Get("RATE_LIMIT") == "on",
+            Docs = !production || Get("API_DOCS") == "on",
         };
     }
 

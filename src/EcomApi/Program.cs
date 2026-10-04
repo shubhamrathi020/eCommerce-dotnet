@@ -106,6 +106,8 @@ app.UseExpressSemantics();
 app.UseSecurityAndCors(config);
 app.UseEarlyErrors();
 app.UseBodyParser();
+// Like Nest, the documentation routes sit before the request-id and metrics middleware (and are never rate limited).
+if (config.Docs) app.UseDocs();
 app.UseRequestContext(metrics);
 app.UseRouting();
 app.MapControllers();

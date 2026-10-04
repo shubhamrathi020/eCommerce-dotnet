@@ -71,9 +71,13 @@ public static class Pipeline
         return noneMatch.Split(',').Any(candidate => Strip(candidate) == current);
     }
 
+    private const string ApiPolicy = "default-src 'none';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'none';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests";
+
+    /// <summary>The documentation page needs scripts and styles of its own.</summary>
+    private const string DocsPolicy = "default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self' 'unsafe-inline';script-src-attr 'none';style-src 'self' 'unsafe-inline';upgrade-insecure-requests";
+
     private static readonly (string, string)[] SecurityHeaders =
     [
-        ("Content-Security-Policy", "default-src 'none';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'none';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests"),
         ("Cross-Origin-Opener-Policy", "same-origin"),
         ("Cross-Origin-Resource-Policy", "same-origin"),
         ("Origin-Agent-Cluster", "?1"),
@@ -94,6 +98,7 @@ public static class Pipeline
     {
         var headers = ctx.Response.Headers;
         foreach (var (name, value) in SecurityHeaders) headers[name] = value;
+        headers["Content-Security-Policy"] = ctx.Request.Path.StartsWithSegments("/docs", StringComparison.OrdinalIgnoreCase) ? DocsPolicy : ApiPolicy;
         // Credentials only for the listed origins. Anything else gets no CORS headers at all (but the preflight still answers).
         headers.Append("Vary", "Origin");
         var origin = ctx.Request.Headers.Origin.ToString();

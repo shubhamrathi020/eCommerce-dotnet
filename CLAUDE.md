@@ -13,6 +13,7 @@ and the integration specs. Solo project; the user pushes (never run `git push`).
 
 ## Rules of this repository
 - Behaviour parity beats idiom. When Nest does something odd (statuses, messages, cookie formats, header names), copy it.
+- `src/EcomApi/docs/*` (the OpenAPI document and Swagger UI pages) are copies exported by `eCommerce-api` (`test/export-openapi.spec.ts`); change the API there first.
 - The entities describe tables Prisma created; never add a migration here. Timestamps are naive UTC (`timestamp(3)`), columns are camelCase.
 - A new route needs the same guard order as Nest: blanket rate limit, bucket limit, authentication, CSRF, body validation, handler.
   Guards are resource filters (they run before model binding); `ValidateModelFilter` turns any binding problem into the one generic 400.
