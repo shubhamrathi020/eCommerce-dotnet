@@ -41,6 +41,13 @@ public static class Json
 internal static class BsonJson
 {
     public static readonly JsonWriterSettings Settings = new() { OutputMode = JsonOutputMode.RelaxedExtendedJson };
+
+    /// <summary>The driver's JSON has spaces around the colons; re-writing it through the JSON writer makes it compact like everything else.</summary>
+    public static void Write(Utf8JsonWriter writer, string json)
+    {
+        using var doc = JsonDocument.Parse(json);
+        doc.RootElement.WriteTo(writer);
+    }
 }
 
 /// <summary>Writes a MongoDB document as the plain JSON object it represents (the catalog's free-form attributes).</summary>
@@ -52,7 +59,7 @@ internal sealed class BsonDocumentConverter : JsonConverter<BsonDocument>
         return BsonDocument.Parse(doc.RootElement.GetRawText());
     }
 
-    public override void Write(Utf8JsonWriter writer, BsonDocument value, JsonSerializerOptions options) => writer.WriteRawValue(value.ToJson(BsonJson.Settings));
+    public override void Write(Utf8JsonWriter writer, BsonDocument value, JsonSerializerOptions options) => BsonJson.Write(writer, value.ToJson(BsonJson.Settings));
 }
 
 internal sealed class BsonArrayConverter : JsonConverter<BsonArray>
@@ -63,5 +70,5 @@ internal sealed class BsonArrayConverter : JsonConverter<BsonArray>
         return BsonArray.Create(BsonSerializer.Deserialize<BsonDocument>("{\"a\":" + doc.RootElement.GetRawText() + "}")["a"]);
     }
 
-    public override void Write(Utf8JsonWriter writer, BsonArray value, JsonSerializerOptions options) => writer.WriteRawValue(value.ToJson(BsonJson.Settings));
+    public override void Write(Utf8JsonWriter writer, BsonArray value, JsonSerializerOptions options) => BsonJson.Write(writer, value.ToJson(BsonJson.Settings));
 }

@@ -35,3 +35,6 @@ and the integration specs. Solo project; the user pushes (never run `git push`).
 - Express answers HEAD from GET routes, lower-case matches routes and adds a weak ETag to every body; `UseExpressSemantics` does the
   same, and `UseRouting` must come after it so routing sees the rewritten method.
 - A native MongoDB on 127.0.0.1 shadows the Docker one for `localhost` in .NET (Node resolves `::1` first); use `[::1]`.
+- Run the shared specs as a whole suite. A partial run (say only `commerce.spec.ts`) can fail with a stock number off by two: the catalog
+  seed resets MongoDB at the start of every run but not the cached product pages in Redis (`ecom:test:*`, 120 s), and it is `admin-catalog.spec`
+  that normally invalidates them. Delete the `ecom:test:*` keys before a partial run (the same holds for the Nest app itself).

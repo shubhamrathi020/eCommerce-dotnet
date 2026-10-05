@@ -152,9 +152,10 @@ public sealed class CacheService(RedisService redis)
             var keys = members.Select(m => redis.Key((string)m!)).Append(tagKey).ToArray();
             await redis.Db.KeyDeleteAsync(keys);
         }
-        catch (Exception)
+        catch (Exception error)
         {
             // Best-effort: a cache that fails to invalidate goes stale until its TTL expires, never blocks the write itself.
+            Log.Warn("Cache", $"could not invalidate tag {tag}: {error.Message}");
         }
     }
 }
