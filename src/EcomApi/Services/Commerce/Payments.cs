@@ -153,25 +153,51 @@ public sealed class PaymentService(EcomDb db, OrderService orders, CartService c
         if (row.Status != "pending_payment") throw new AppError(ApiErrorCode.Validation, "This order can no longer be paid.");
         var valid = result.ProviderOrderId == row.ProviderOrderId && razorpay.VerifyPaymentSignature(result.ProviderOrderId, result.ProviderPaymentId, result.Signature);
         if (!valid) throw new AppError(ApiErrorCode.Validation, "Payment verification failed. If money was deducted it will be refunded.");
-        var now = Derive.Iso(DateTimeOffset.UtcNow);
-        var timeline = Json.Deserialize<List<TimelineEntry>>(row.Timeline)!;
-        timeline.Add(new TimelineEntry { Status = "paid", Label = "Payment received", At = now });
-        timeline.Add(new TimelineEntry { Status = "confirmed", Label = "Order confirmed", At = now });
-        await using (var tx = await db.Database.BeginTransactionAsync())
-        {
-            row.Status = "confirmed";
-            row.PaymentStatus = "paid";
-            row.ProviderPaymentId = result.ProviderPaymentId;
-            row.Timeline = Json.Serialize(timeline);
-            outbox.Write("payment.confirmed", new { orderId, email = row.ContactEmail, name = row.ContactName, amount = Json.Deserialize<CartTotals>(row.Totals)!.Total });
-            await db.SaveChangesAsync();
-            await tx.CommitAsync();
-        }
+        var contract = await MarkPaidAsync(row, result.ProviderPaymentId);
         await cart.ReplaceWithEmptyAsync(Cookies.OwnerKeyFor(owner.UserId, owner.GuestToken ?? ""), row.ShippingMethod);
-        var contract = OrderService.ToOrder(row);
-        await orderEvents.PublishAsync(contract);
         return contract;
     }
+
+    /// <summary>
+    /// Marks an order paid and confirmed once, however many times the browser and the webhook report the same payment: the row is locked
+    /// and re-read inside the transaction, and only the report that actually changes it writes the confirmation email and the live event.
+    /// </summary>
+    async Task<Order> MarkPaidAsync(OrderRow row, string providerPaymentId, OrderNote? note = null)
+    {
+        bool changed;
+        await using (var tx = await db.Database.BeginTransactionAsync())
+        {
+            await db.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM orders WHERE \"id\" = {row.Id} FOR UPDATE");
+            await db.Entry(row).ReloadAsync();
+            changed = row.PaymentStatus != "paid";
+            if (changed)
+            {
+                var now = Derive.Iso(DateTimeOffset.UtcNow);
+                var timeline = Json.Deserialize<List<TimelineEntry>>(row.Timeline)!;
+                timeline.Add(new TimelineEntry { Status = "paid", Label = "Payment received", At = now });
+                timeline.Add(new TimelineEntry { Status = "confirmed", Label = "Order confirmed", At = now });
+                row.Status = "confirmed";
+                row.PaymentStatus = "paid";
+                row.ProviderPaymentId = providerPaymentId;
+                row.Timeline = Json.Serialize(timeline);
+                if (note is not null)
+                {
+                    var notes = Json.Deserialize<List<OrderNote>>(row.Notes) ?? [];
+                    notes.Insert(0, note);
+                    row.Notes = Json.Serialize(notes);
+                }
+                outbox.Write("payment.confirmed", new { orderId = row.Id, email = row.ContactEmail, name = row.ContactName, amount = Json.Deserialize<CartTotals>(row.Totals)!.Total });
+                await db.SaveChangesAsync();
+            }
+            await tx.CommitAsync();
+        }
+        var contract = OrderService.ToOrder(row);
+        if (changed) await orderEvents.PublishAsync(contract);
+        return contract;
+    }
+
+    static OrderNote SystemNote(string text) =>
+        new() { Id = $"note_{Ids.Base36(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())}{Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(2))}", At = Derive.Iso(DateTimeOffset.UtcNow), Author = "system", Text = text };
 
     public async Task<Order> FailAsync(string orderId, OwnerContext owner, string reason)
     {
@@ -180,7 +206,7 @@ public sealed class PaymentService(EcomDb db, OrderService orders, CartService c
         // A failed payment gives its stock back; a retry (via initiate) claims it again.
         await inventory.GiveBackAsync(OrderService.StockLinesOf(row));
         var notes = Json.Deserialize<List<OrderNote>>(row.Notes) ?? [];
-        notes.Insert(0, new OrderNote { Id = $"note_{Ids.Base36(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())}{Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(2))}", At = Derive.Iso(DateTimeOffset.UtcNow), Author = "system", Text = $"Payment attempt failed: {reason}" });
+        notes.Insert(0, SystemNote($"Payment attempt failed: {reason}"));
         row.PaymentStatus = "failed";
         row.Notes = Json.Serialize(notes);
         await db.SaveChangesAsync();
@@ -188,8 +214,13 @@ public sealed class PaymentService(EcomDb db, OrderService orders, CartService c
     }
 
     /// <summary>
-    /// Razorpay's webhook: authenticated only by its signature over the untouched raw body. Always answers ok, so an attacker learns nothing
-    /// about what a valid signature looks like, and is idempotent: an event already applied is acknowledged again without re-applying it.
+    /// Razorpay's webhook: the safety net for a payment the browser never reported (closed tab, lost connection, a UPI request approved
+    /// later), authenticated only by its signature over the untouched raw body. Always answers ok, so an attacker learns nothing about what a
+    /// valid signature looks like, and is idempotent.
+    ///
+    /// Only a captured payment changes anything. Razorpay sends payment.failed for every failed attempt, also while its window is still open
+    /// and the shopper tries another method, so a failure here must not give the stock back (the browser reports a real give-up through fail,
+    /// and the payment-deadline sweep releases an abandoned order).
     /// </summary>
     public async Task WebhookAsync(string? rawBody, string? signature)
     {
@@ -201,30 +232,26 @@ public sealed class PaymentService(EcomDb db, OrderService orders, CartService c
         var evt = JsonNode.Parse(rawBody);
         var payment = evt?["payload"]?["payment"]?["entity"];
         var providerOrderId = payment?["order_id"]?.GetValue<string>();
-        if (providerOrderId is null) return;
+        var paymentId = payment?["id"]?.GetValue<string>();
+        if (evt?["event"]?.GetValue<string>() != "payment.captured" || providerOrderId is null || paymentId is null) return;
         var order = await db.Orders.FirstOrDefaultAsync(o => o.ProviderOrderId == providerOrderId);
-        if (order is null) return;
-        var name = evt?["event"]?.GetValue<string>();
-        if (name == "payment.captured" && order.PaymentStatus != "paid" && order.Status == "pending_payment")
+        if (order is null || order.PaymentStatus == "paid" || order.Status != "pending_payment") return;
+        OrderNote? shortfall = null;
+        if (order.PaymentStatus == "failed")
         {
-            var now = Derive.Iso(DateTimeOffset.UtcNow);
-            var timeline = Json.Deserialize<List<TimelineEntry>>(order.Timeline)!;
-            timeline.Add(new TimelineEntry { Status = "paid", Label = "Payment received", At = now });
-            timeline.Add(new TimelineEntry { Status = "confirmed", Label = "Order confirmed", At = now });
-            order.Status = "confirmed";
-            order.PaymentStatus = "paid";
-            order.ProviderPaymentId = payment?["id"]?.GetValue<string>();
-            order.Timeline = Json.Serialize(timeline);
-            await db.SaveChangesAsync();
-            Log.Info("RazorpayWebhook", $"Webhook confirmed payment for order {order.Id}");
+            // The browser reported a failure, which released the stock hold, before this payment was captured: take it again.
+            try
+            {
+                await inventory.TakeAsync(OrderService.StockLinesOf(order));
+            }
+            catch (AppError)
+            {
+                // The money is taken, so the order is confirmed anyway; staff see why it may not be shippable.
+                shortfall = SystemNote("Paid after its stock hold was released, and the items could not be reserved again. Check stock before shipping, or cancel and refund.");
+            }
         }
-        else if (name == "payment.failed" && order.PaymentStatus == "pending")
-        {
-            await inventory.GiveBackAsync(OrderService.StockLinesOf(order));
-            order.PaymentStatus = "failed";
-            await db.SaveChangesAsync();
-            Log.Info("RazorpayWebhook", $"Webhook recorded a failed payment for order {order.Id}");
-        }
+        await MarkPaidAsync(order, paymentId, shortfall);
+        Log.Info("RazorpayWebhook", $"Webhook confirmed payment for order {order.Id}");
     }
 }
 

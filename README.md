@@ -12,7 +12,7 @@ Redis, RabbitMQ), so a frontend can talk to any of the backends and they can eve
 ## How it is kept identical
 
 1. **The Nest test suite runs against this server.** `eCommerce-api` has a test harness mode: with `API_BIN` (and `API_ARGS`) pointing
-   at the server built here, its 65 integration specs start it as a child process and run unchanged over HTTP (auth, accounts,
+   at the server built here, its 68 integration specs start it as a child process and run unchanged over HTTP (auth, accounts,
    catalog, admin catalog, cart, checkout, orders, payments, messaging, metrics, contract shapes). The one spec that calls a Nest
    internal directly (the abandoned-cart job) is covered by `tests/EcomApi.Tests/SchedulerTests.cs` here.
 2. **The shared business rules are checked against golden output from the TypeScript original.** `tests/EcomApi.Tests/testdata/golden.json`
